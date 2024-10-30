@@ -1,8 +1,6 @@
 import cv2
 import numpy as np
 import glob
-import pdb
-import os
 
 class PanaromaStitcher:
     def __init__(self):
