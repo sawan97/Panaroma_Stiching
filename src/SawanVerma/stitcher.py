@@ -1,6 +1,9 @@
+import glob
+import pdb
+import os
 import cv2
 import numpy as np
-import glob
+
 
 class PanaromaStitcher:
     def __init__(self):
@@ -10,20 +13,20 @@ class PanaromaStitcher:
     def make_panaroma_for_images_in(self, path):
         image_paths = glob.glob('{}/*.*'.format(path))
         if len(image_paths) < 2:
-            raise ValueError("Need at least two images to create a panorama")
+            raise ValueError("We Need at least two images to create a panorama")
 
         images = [cv2.imread(im_path) for im_path in image_paths]
         if any(image is None for image in images):
             raise ValueError("Error reading one or more images from the path")
 
-        stitched_image = images[0]
-        homography_matrix_list = []
+        stiched_image = images[0]
+        homography_matrix = []
 
         for i in range(1, len(images)):
-            kp1, des1 = self.sift.detectAndCompute(stitched_image, None)
-            kp2, des2 = self.sift.detectAndCompute(images[i], None)
+            keypoints_1, descriptors_1 = self.sift.detectAndCompute(stiched_image, None)
+            keypoints_2, descriptors_2 = self.sift.detectAndCompute(images[i], None)
 
-            knn_matches = self.matcher.knnMatch(des1, des2, k=2)
+            knn_matches = self.matcher.knnMatch(descriptors_1, descriptors_2, k=2)
 
             good_matches = []
             for m, n in knn_matches:
@@ -34,23 +37,22 @@ class PanaromaStitcher:
                 print(f"Warning: Not enough good matches between image {i} and image {i-1}. Skipping this pair.")
                 continue
 
-            pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 2)
-            pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 2)
+            points_1 = np.float32([keypoints_1[m.queryIdx].pt for m in good_matches]).reshape(-1, 2)
+            points_2 = np.float32([keypoints_2[m.trainIdx].pt for m in good_matches]).reshape(-1, 2)
 
-            H = self.compute_homography(pts2, pts1)
+            H = self.compute_homography(points_2, points_1)
             if H is None:
-                print(f"Warning: Failed to compute homography for image {i} and image {i-1}. Skipping this pair.")
                 continue
 
-            homography_matrix_list.append(H)
-            stitched_image = self.inverse_warp(stitched_image, images[i], H)
+            homography_matrix.append(H)
+            stiched_image = self.inverse_warp(stiched_image, images[i], H)
 
-        return stitched_image, homography_matrix_list
+        return stiched_image, homography_matrix
 
     def normalize_points(self, pts):
         mean = np.mean(pts, axis=0)
         std = np.std(pts, axis=0)
-        std[std < 1e-8] = 1e-8  # avoiding division by zero (adding a small epsilon
+        std[std < 1e-8] = 1e-8
         scale = np.sqrt(2) / std
         T = np.array([[scale[0], 0, -scale[0]*mean[0]],
                       [0, scale[1], -scale[1]*mean[1]],
@@ -72,15 +74,15 @@ class PanaromaStitcher:
         try:
             U, S, Vt = np.linalg.svd(A)
         except np.linalg.LinAlgError:
-            print("Warning: SVD did not converge. Returning None for homography.")
+            print("Warning: SVD did not converge.")
             return None
         H_norm = Vt[-1].reshape(3, 3)
-        H = np.linalg.inv(T2) @ H_norm @ T1      # Denormalizing
+        H = np.linalg.inv(T2) @ H_norm @ T1
         return H / H[2, 2]
 
     def compute_homography(self, pts1, pts2):
         max_iterations = 2000
-        threshold = 3.0  # Adjusted threshold for better inlier selection
+        threshold = 3.0
         best_H = None
         max_inliers = 0
         best_inliers = []
@@ -111,23 +113,23 @@ class PanaromaStitcher:
                 best_H = H_candidate
                 best_inliers = inliers
 
-        if best_H is not None and len(best_inliers) >= 10:  #atleast 10 inliers
+        if best_H is not None and len(best_inliers) >= 10:
             best_H = self.dlt(pts1[best_inliers], pts2[best_inliers])
         else:
-            print("Warning: Not enough inliers after RANSAC.")
+            # print("Warning: Not enough inliers after RANSAC.")
             return None
 
         return best_H
 
     def apply_homography_to_points(self, H, pts):
-        pts_homogeneous = np.hstack([pts, np.ones((pts.shape[0], 1))])
-        transformed_pts = (H @ pts_homogeneous.T).T
+        homogeneous_pts = np.hstack([pts, np.ones((pts.shape[0], 1))])
+        transformed_pts = (H @ homogeneous_pts.T).T
         transformed_pts[transformed_pts[:, 2] == 0, 2] = 1e-10
         transformed_pts = transformed_pts[:, :2] / transformed_pts[:, 2, np.newaxis]
         return transformed_pts
 
     def warp_image(self, img1, img2, H, output_shape):
-        h_out, w_out = output_shape    # coordinate grid
+        h_out, w_out = output_shape
         xx, yy = np.meshgrid(np.arange(w_out), np.arange(h_out))
         ones = np.ones_like(xx)
         coords = np.stack([xx, yy, ones], axis=-1).reshape(-1, 3)
@@ -137,7 +139,7 @@ class PanaromaStitcher:
         coords_transformed[coords_transformed[:, 2] == 0, 2] = 1e-10
         coords_transformed /= coords_transformed[:, 2, np.newaxis]
 
-        x_src = coords_transformed[:, 0]  #interpolate
+        x_src = coords_transformed[:, 0]
         y_src = coords_transformed[:, 1]
 
         valid_indices = (
@@ -152,7 +154,7 @@ class PanaromaStitcher:
         x1 = x0 + 1
         y1 = y0 + 1
 
-        wx = x_src - x0         # Bilinear interpolation weights
+        wx = x_src - x0
         wy = y_src - y0
 
         img_flat = img2.reshape(-1, img2.shape[2])
@@ -193,16 +195,15 @@ class PanaromaStitcher:
 
         output_shape = (y_max - y_min, x_max - x_min)
         warped_img2 = self.warp_image(img1, img2, H_translated, output_shape)
-        stitched_image = np.zeros((output_shape[0], output_shape[1], 3), dtype=img1.dtype)
-        stitched_image[-y_min:-y_min + h1, -x_min:-x_min + w1] = img1
+        stiched_image = np.zeros((output_shape[0], output_shape[1], 3), dtype=img1.dtype)
+        stiched_image[-y_min:-y_min + h1, -x_min:-x_min + w1] = img1
 
         # masks
-        mask1 = (stitched_image > 0).astype(np.float32)
+        mask1 = (stiched_image > 0).astype(np.float32)
         mask2 = (warped_img2 > 0).astype(np.float32)
 
-        # Blend images
-        combined_mask = mask1 + mask2
-        stitched_image = (stitched_image * mask1 + warped_img2 * mask2) / combined_mask
-        stitched_image = np.nan_to_num(stitched_image).astype(np.uint8)
+        total_mask = mask1 + mask2
+        stiched_image = (stiched_image * mask1 + warped_img2 * mask2) / total_mask
+        stiched_image = np.nan_to_num(stiched_image).astype(np.uint8)
 
-        return stitched_image
+        return stiched_image
